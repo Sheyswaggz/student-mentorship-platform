@@ -1,0 +1,253 @@
+name: Deploy to Development
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  KUBE_NAMESPACE: development
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  deploy:
+    name: Deploy to Development Environment
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    
+    environment:
+      name: development
+      url: http://mentorship-dev.local
+    
+    permissions:
+      contents: read
+      packages: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up kubectl
+        uses: azure/setup-kubectl@v3
+        with:
+          version: 'v1.28.0'
+      
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p $HOME/.kube
+          echo "${{ secrets.KUBE_CONFIG_DEV }}" | base64 -d > $HOME/.kube/config
+          chmod 600 $HOME/.kube/config
+          
+          kubectl config view --minify
+          kubectl cluster-info
+      
+      - name: Verify namespace
+        run: |
+          if ! kubectl get namespace ${{ env.KUBE_NAMESPACE }} &> /dev/null; then
+            echo "Namespace ${{ env.KUBE_NAMESPACE }} does not exist, creating..."
+            kubectl create namespace ${{ env.KUBE_NAMESPACE }}
+          fi
+          
+          kubectl get namespace ${{ env.KUBE_NAMESPACE }}
+      
+      - name: Extract image tag from CI workflow
+        id: image-tag
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            IMAGE_TAG="main-${{ github.sha }}"
+          else
+            IMAGE_TAG="main-${{ github.event.workflow_run.head_sha }}"
+          fi
+          
+          FULL_IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${IMAGE_TAG}"
+          
+          echo "image_tag=${IMAGE_TAG}" >> $GITHUB_OUTPUT
+          echo "full_image=${FULL_IMAGE}" >> $GITHUB_OUTPUT
+          
+          echo "Deploying image: ${FULL_IMAGE}"
+      
+      - name: Update deployment image
+        run: |
+          kubectl set image deployment/mentorship-platform-deployment \
+            mentorship-platform=${{ steps.image-tag.outputs.full_image }} \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            --record
+          
+          kubectl annotate deployment/mentorship-platform-deployment \
+            kubernetes.io/change-cause="Deploy ${{ steps.image-tag.outputs.image_tag }} from commit ${{ github.sha }} via GitHub Actions" \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            --overwrite
+      
+      - name: Wait for rollout to complete
+        run: |
+          echo "Waiting for deployment rollout to complete..."
+          
+          kubectl rollout status deployment/mentorship-platform-deployment \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            --timeout=10m
+          
+          echo "Rollout completed successfully"
+      
+      - name: Verify deployment
+        run: |
+          echo "Verifying deployment status..."
+          
+          kubectl get deployment mentorship-platform-deployment \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            -o wide
+          
+          kubectl get pods \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            -l app=mentorship-platform \
+            -o wide
+          
+          kubectl get replicaset \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            -l app=mentorship-platform
+      
+      - name: Check pod health
+        run: |
+          echo "Checking pod health status..."
+          
+          PODS=$(kubectl get pods -n ${{ env.KUBE_NAMESPACE }} -l app=mentorship-platform -o jsonpath='{.items[*].metadata.name}')
+          
+          for POD in $PODS; do
+            echo "Pod: $POD"
+            kubectl get pod $POD -n ${{ env.KUBE_NAMESPACE }} -o jsonpath='{.status.phase}'
+            echo ""
+            
+            READY=$(kubectl get pod $POD -n ${{ env.KUBE_NAMESPACE }} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')
+            if [ "$READY" != "True" ]; then
+              echo "Pod $POD is not ready"
+              kubectl describe pod $POD -n ${{ env.KUBE_NAMESPACE }}
+              exit 1
+            fi
+          done
+          
+          echo "All pods are healthy"
+      
+      - name: Verify service endpoint
+        run: |
+          echo "Verifying service configuration..."
+          
+          kubectl get service mentorship-platform-service \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            -o wide
+          
+          SERVICE_IP=$(kubectl get service mentorship-platform-service \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            -o jsonpath='{.spec.clusterIP}')
+          
+          echo "Service ClusterIP: $SERVICE_IP"
+      
+      - name: Run health check
+        run: |
+          echo "Running application health check..."
+          
+          SERVICE_NAME="mentorship-platform-service"
+          SERVICE_PORT="80"
+          MAX_ATTEMPTS=30
+          ATTEMPT=0
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo "Health check attempt $ATTEMPT of $MAX_ATTEMPTS..."
+            
+            if kubectl run health-check-${{ github.run_id }} \
+              --image=curlimages/curl:latest \
+              --rm -i --restart=Never \
+              -n ${{ env.KUBE_NAMESPACE }} \
+              --command -- curl -f -s -o /dev/null -w "%{http_code}" \
+              http://${SERVICE_NAME}.${KUBE_NAMESPACE}.svc.cluster.local:${SERVICE_PORT}/api/health 2>&1 | grep -q "200"; then
+              echo "Health check passed!"
+              exit 0
+            fi
+            
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              echo "Health check failed, retrying in 10 seconds..."
+              sleep 10
+            fi
+          done
+          
+          echo "Health check failed after $MAX_ATTEMPTS attempts"
+          
+          echo "Deployment logs:"
+          kubectl logs -n ${{ env.KUBE_NAMESPACE }} -l app=mentorship-platform --tail=50
+          
+          exit 1
+      
+      - name: Get deployment logs
+        if: always()
+        run: |
+          echo "Fetching recent deployment logs..."
+          
+          kubectl logs -n ${{ env.KUBE_NAMESPACE }} \
+            -l app=mentorship-platform \
+            --tail=100 \
+            --timestamps
+      
+      - name: Rollback on failure
+        if: failure()
+        run: |
+          echo "Deployment failed, initiating rollback..."
+          
+          kubectl rollout undo deployment/mentorship-platform-deployment \
+            -n ${{ env.KUBE_NAMESPACE }}
+          
+          echo "Waiting for rollback to complete..."
+          kubectl rollout status deployment/mentorship-platform-deployment \
+            -n ${{ env.KUBE_NAMESPACE }} \
+            --timeout=5m
+          
+          echo "Rollback completed"
+          
+          kubectl get pods -n ${{ env.KUBE_NAMESPACE }} -l app=mentorship-platform
+      
+      - name: Post deployment notification
+        if: always()
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: |
+            Development Deployment: ${{ job.status }}
+            
+            Environment: development
+            Image: ${{ steps.image-tag.outputs.full_image }}
+            Commit: ${{ github.sha }}
+            Workflow: ${{ github.workflow }}
+            URL: http://mentorship-dev.local
+            
+            ${{ job.status == 'success' && '✅ Deployment successful' || '❌ Deployment failed - rolled back' }}
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+          channel: '#deployments'
+        continue-on-error: true
+      
+      - name: Create deployment summary
+        if: always()
+        run: |
+          echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment:** development" >> $GITHUB_STEP_SUMMARY
+          echo "**Status:** ${{ job.status }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ steps.image-tag.outputs.full_image }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "**URL:** http://mentorship-dev.local" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ Deployment completed successfully" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ Deployment failed and was rolled back" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Deployment Details" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          kubectl get deployment mentorship-platform-deployment -n ${{ env.KUBE_NAMESPACE }} -o wide >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
