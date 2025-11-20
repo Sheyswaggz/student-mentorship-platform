@@ -1,0 +1,48 @@
+// =============================================================================
+// STUDENT MENTORSHIP PLATFORM - PRISMA SCHEMA
+// =============================================================================
+// This schema defines the database models for user management and authentication
+// Provider: PostgreSQL
+// ORM: Prisma Client
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+enum Role {
+  STUDENT
+  MENTOR
+}
+
+// =============================================================================
+// MODELS
+// =============================================================================
+
+model User {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  password        String
+  name            String
+  role            Role      @default(STUDENT)
+  bio             String?
+  interests       String[]
+  expertise       String[]
+  availability    String?
+  profilePicture  String?
+  emailVerified   DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([email])
+  @@index([role])
+}
