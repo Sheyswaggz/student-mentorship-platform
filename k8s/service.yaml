@@ -1,0 +1,27 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: mentorship-platform-service
+  namespace: development
+  labels:
+    app: mentorship-platform
+    environment: development
+    version: v1.0.0
+    component: application
+  annotations:
+    description: "Mentorship platform internal service for development environment"
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "9090"
+spec:
+  type: ClusterIP
+  selector:
+    app: mentorship-platform
+  ports:
+    - name: http
+      port: 80
+      targetPort: 3000
+      protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
