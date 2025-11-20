@@ -59,14 +59,14 @@ jobs:
             --nodePackageSkipDevDependencies
       
       - name: Upload OWASP Dependency Check results
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: dependency-check-report/dependency-check-report.sarif
           category: dependency-check
       
       - name: Upload dependency check artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: dependency-check-reports
@@ -112,7 +112,7 @@ jobs:
           timeout: '15m'
       
       - name: Upload Trivy results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: 'trivy-results.sarif'
@@ -135,7 +135,7 @@ jobs:
           severity: 'CRITICAL,HIGH,MEDIUM'
       
       - name: Upload Trivy scan artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: trivy-scan-reports
@@ -182,7 +182,7 @@ jobs:
           SEMGREP_RULES: auto
       
       - name: Upload Semgrep results to GitHub Security
-        uses: github/codeql-action/upload-sarif@v2
+        uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
           sarif_file: semgrep.sarif
@@ -198,7 +198,7 @@ jobs:
         continue-on-error: true
       
       - name: Upload code scan artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: code-scan-reports
@@ -236,7 +236,7 @@ jobs:
           extra_args: --debug --only-verified
       
       - name: Upload secret scan results
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         if: always()
         with:
           name: secret-scan-reports
@@ -256,7 +256,7 @@ jobs:
     
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v3
+        uses: actions/download-artifact@v4
       
       - name: Generate security summary
         run: |
